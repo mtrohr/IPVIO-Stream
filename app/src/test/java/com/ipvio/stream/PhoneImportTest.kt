@@ -65,4 +65,26 @@ class PhoneImportTest {
         assertTrue(PhoneImportLogic.page(1).contains("Send to TV"))
         assertTrue(PhoneImportLogic.message(7, "ok").contains("Envoyé"))
     }
+    @Test fun phoneProviderLoginUsesSelectedPreloadedServerAndPersistsIdentity() {
+        val choices = listOf(ProviderTemplate("combo", "Astranet Combo", "https://example.com"))
+        val input = PhoneImportLogic.toInput(mapOf("provider_id" to "combo", "user" to "alice", "pass" to "secret"), choices)
+        assertNotNull(input)
+        assertTrue(input!!.isXtream)
+        assertEquals("https://example.com", input.host)
+        assertEquals("combo", input.providerId)
+        assertEquals("Astranet Combo", input.providerName)
+        assertEquals("https://example.com/get.php?username=alice&password=secret&type=m3u_plus&output=ts",
+            PlaylistStore.xtreamUrl(input.host, input.user, input.pass))
+    }
+
+    @Test fun phoneProviderFormContainsPreloadedChoicesAndManualXtream() {
+        ProviderDirectory.remember(ProviderDirectory.Snapshot(1, 3600, listOf(
+            ProviderTemplate("combo", "Astranet Combo", "https://example.com")
+        )))
+        val page = PhoneImportLogic.page(1)
+        assertTrue(page.contains("Provider login"))
+        assertTrue(page.contains("Astranet Combo"))
+        assertTrue(page.contains("Manual Xtream login"))
+    }
+
 }

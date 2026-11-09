@@ -14,6 +14,12 @@ val secrets = Properties().apply {
 fun secret(name: String): String =
     (secrets.getProperty(name) ?: System.getenv(name) ?: "").trim().filter { it.isLetterOrDigit() }
 
+val signingProps = Properties().apply {
+    val f = rootProject.file("release-signing/keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun signingProp(name: String): String = (signingProps.getProperty(name) ?: "").trim()
+
 android {
     namespace = "com.ipvio.stream"
     compileSdk {
@@ -21,7 +27,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.ipvio.stream"
+        applicationId = "com.ipvio.stream.ahv"
         minSdk = 24
         targetSdk = 37
         versionCode = 1
@@ -31,11 +37,26 @@ android {
         buildConfigField("String", "OMDB_KEY", "\"${secret("OMDB_KEY")}\"")
     }
 
+    signingConfigs {
+        create("release") {
+            val store = signingProp("storeFile")
+            if (store.isNotEmpty()) {
+                storeFile = file(store)
+                storePassword = signingProp("storePassword")
+                keyAlias = signingProp("keyAlias")
+                keyPassword = signingProp("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
+            // Keep production signing, but disable release shrinking/optimization for now.
+            // The shrunk release force-closes on emulator while debug works; an unshrunk
+            // signed release isolates R8/resource shrinking as the crash source.
             optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+                enable = false
             }
         }
     }
@@ -71,4 +92,5 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

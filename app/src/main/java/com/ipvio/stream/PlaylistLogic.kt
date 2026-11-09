@@ -16,6 +16,7 @@ object PlaylistLogic {
     }
 
     private val HTTP_URL = Regex("""^https?://[^\s/?#:@]+(:\d{1,5})?([/?#]\S*)?$""", RegexOption.IGNORE_CASE)
+    private val HTTP_URL_WITH_PATH = Regex("""^https?://[^\s?#:@]+(:\d{1,5})?(/[^\s?#]*)?$""", RegexOption.IGNORE_CASE)
     private const val MAX_LEN = 4096
 
     /** Bereinigte Adresse oder null, wenn sie keine gültige http(s)-Adresse ist. Zugangsdaten in der Adresse sind erlaubt. */
@@ -23,7 +24,7 @@ object PlaylistLogic {
         val u = raw.trim()
         if (u.isEmpty() || u.length > MAX_LEN) return null
         val noCred = u.replaceFirst(Regex("""^(https?://)[^/@\s]*@""", RegexOption.IGNORE_CASE), "$1")
-        return if (HTTP_URL.matches(noCred)) u else null
+        return if (HTTP_URL.matches(noCred) || HTTP_URL_WITH_PATH.matches(noCred)) u else null
     }
 
     /** Xtream-Adresse aus Server, Benutzer und Passwort (Sonderzeichen werden kodiert) oder null bei fehlenden Angaben. */
