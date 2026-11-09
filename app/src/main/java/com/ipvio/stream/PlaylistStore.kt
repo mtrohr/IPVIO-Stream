@@ -38,7 +38,7 @@ import java.util.zip.Deflater
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
-data class PL(val name: String, val url: String)
+data class PL(val name: String, val url: String, val providerId: String? = null)
 
 /**
  * Playlists: Liste der gespeicherten Zugänge, Laden, Zwischenspeicher.
@@ -202,7 +202,7 @@ object PlaylistStore {
             val a = JSONArray(json)
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                lists.add(PL(o.getString("name"), o.getString("url")))
+                lists.add(PL(o.getString("name"), o.getString("url"), o.optString("provider_id").takeIf { it.isNotBlank() }))
             }
         } catch (e: Exception) {
         }
@@ -224,7 +224,7 @@ object PlaylistStore {
 
     private fun persist(c: Context) {
         val a = JSONArray()
-        for (l in lists) a.put(JSONObject().put("name", l.name).put("url", l.url))
+        for (l in lists) a.put(JSONObject().put("name", l.name).put("url", l.url).also { if (l.providerId != null) it.put("provider_id", l.providerId) })
         val e = prefs(c).edit().putInt("active", active).remove("url")
         val token = Secrets.encrypt(a.toString())
         if (token != null) e.putString("lists_enc", token).remove("lists")
@@ -241,9 +241,11 @@ object PlaylistStore {
         return LoadLogic.Pending.decode((if (enc != null) Secrets.decrypt(enc) else null) ?: p.getString("pending", null))
     }
 
+    private fun pendingProviderId(c: Context): String? = prefs(c).getString("pending_provider_id", null)
+
     private fun writePending(c: Context, v: LoadLogic.Pending?) {
         val e = prefs(c).edit()
-        if (v == null) e.remove("pending_enc").remove("pending")
+        if (v == null) e.remove("pending_enc").remove("pending").remove("pending_provider_id").remove("pending_provider_name")
         else {
             val token = Secrets.encrypt(v.encode())
             if (token != null) e.putString("pending_enc", token).remove("pending") else e.putString("pending", v.encode()).remove("pending_enc")
@@ -266,9 +268,27 @@ object PlaylistStore {
 
     fun activate(c: Context, i: Int) { ensure(c); if (i in lists.indices) { active = i; persist(c) } }
 
+    /** Update saved provider URLs by stable directory ID while preserving the customer credentials. */
+    fun reconcileProviderDirectory(c: Context, services: List<ProviderTemplate>) {
+        ensure(c)
+        val byId = services.associateBy { it.id }
+        var changed = false
+        for (i in lists.indices) {
+            val saved = lists[i]
+            val service = saved.providerId?.let(byId::get) ?: continue
+            val parts = LoadLogic.xtreamParts(saved.url) ?: continue
+            val newUrl = xtreamUrl(service.serverUrl, parts.second, parts.third) ?: continue
+            if (newUrl != saved.url || service.displayName != saved.name) {
+                lists[i] = PL(service.displayName, newUrl, service.id)
+                changed = true
+            }
+        }
+        if (changed) persist(c)
+    }
+
     fun rename(c: Context, i: Int, name: String) {
         ensure(c)
-        if (i in lists.indices && name.isNotBlank()) { lists[i] = PL(name.trim(), lists[i].url); persist(c) }
+        if (i in lists.indices && name.isNotBlank()) { lists[i] = lists[i].copy(name = name.trim()); persist(c) }
     }
 
     fun remove(c: Context, i: Int) {
@@ -641,11 +661,11 @@ object PlaylistStore {
      */
     suspend fun load(
         c: Context, url: String, save: Boolean, skipNetworkWhenCached: Boolean = false,
-        ask: Boolean = true, resumed: Boolean = false
+        ask: Boolean = true, resumed: Boolean = false, providerId: String? = null, providerName: String? = null
     ): Boolean {
         if (!loadLock.tryLock()) return rawChannels.isNotEmpty()
         try {
-            return loadInner(c, url, save, skipNetworkWhenCached, ask, resumed)
+            return loadInner(c, url, save, skipNetworkWhenCached, ask, resumed, providerId, providerName)
         } finally {
             loading = false   // auch bei Abbruch: sonst bliebe der Ladezustand (und die Bildschirm-Wachhaltung) hängen
             heavy = false
@@ -657,7 +677,7 @@ object PlaylistStore {
         }
     }
 
-    private suspend fun loadInner(c: Context, url: String, save: Boolean, skipNetworkWhenCached: Boolean, ask: Boolean, resumed: Boolean): Boolean {
+    private suspend fun loadInner(c: Context, url: String, save: Boolean, skipNetworkWhenCached: Boolean, ask: Boolean, resumed: Boolean, providerId: String? = null, providerName: String? = null): Boolean {
         ensure(c)
         val u = PlaylistLogic.normalizeUrl(url) ?: run { error = "Bitte eine gültige Adresse eingeben (beginnt mit http:// oder https://)."; return false }
         job = currentCoroutineContext()[Job]
@@ -668,6 +688,10 @@ object PlaylistStore {
             val prev = pending(c)
             // Letzter Versuch abgestürzt oder zu groß, jetzt von Hand neu gestartet: bei großer Liste die Sprachen noch einmal zeigen
             forceAsk = !resumed && prev != null && prev.url == u && (prev.interrupted || prev.msg == MSG_TOO_BIG)
+            prefs(c).edit()
+                .putString("pending_provider_id", providerId ?: pendingProviderId(c))
+                .putString("pending_provider_name", providerName ?: prefs(c).getString("pending_provider_name", null))
+                .commit()
             writePending(c, LoadLogic.started(prev, u, resumed))
         }
         if (askNext && ask) forceAsk = true
@@ -677,7 +701,7 @@ object PlaylistStore {
             usedCache = r == Local.OK
         }
         if (usedCache && skipNetworkWhenCached) {
-            if (save) finishSave(c, u)
+            if (save) finishSave(c, u, providerId, providerName)
             return true
         }
         error = null
@@ -702,7 +726,7 @@ object PlaylistStore {
                 val list = parsed.items
                 if (sig(list) != before || !usedCache || b.hidden != shownHidden) show(c, u, list, urls, order, parsed.counts, parsed.bytes, b.hidden)
                 else { epgUrls = urls; catOrder = order; langCounts = parsed.counts; langBytes = parsed.bytes; Catchup.start(c, u, list) }
-                if (save) finishSave(c, u)
+                if (save) finishSave(c, u, providerId, providerName)
                 askNext = false
                 true
             } catch (e: CancellationException) {
@@ -727,9 +751,12 @@ object PlaylistStore {
     }
 
     /** Neu hinzugefügte Playlist erfolgreich geladen: in die Liste übernehmen und den gemerkten Auftrag löschen. */
-    private fun finishSave(c: Context, u: String) {
-        val idx = lists.indexOfFirst { it.url == u }
-        if (idx >= 0) active = idx else { lists.add(PL(hostOf(u), u)); active = lists.size - 1 }
+    private fun finishSave(c: Context, u: String, providerId: String? = null, providerName: String? = null) {
+        val durableProviderId = providerId ?: pendingProviderId(c)
+        val durableProviderName = providerName ?: prefs(c).getString("pending_provider_name", null)
+        val idx = lists.indexOfFirst { it.url == u || (durableProviderId != null && it.providerId == durableProviderId) }
+        if (idx >= 0) { lists[idx] = PL(durableProviderName ?: lists[idx].name, u, durableProviderId ?: lists[idx].providerId); active = idx }
+        else { lists.add(PL(durableProviderName ?: hostOf(u), u, durableProviderId)); active = lists.size - 1 }
         persist(c)
         clearPending(c)
     }

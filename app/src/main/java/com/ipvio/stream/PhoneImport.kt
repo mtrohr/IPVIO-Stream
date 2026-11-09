@@ -11,7 +11,14 @@ import java.security.SecureRandom
 import kotlin.concurrent.thread
 
 /** Eine vom Handy gesendete Playlist: entweder ein M3U-Link oder Xtream-Zugangsdaten. */
-class PhoneInput(val url: String, val host: String, val user: String, val pass: String) {
+class PhoneInput(
+    val url: String,
+    val host: String,
+    val user: String,
+    val pass: String,
+    val providerId: String? = null,
+    val providerName: String? = null
+) {
     val isXtream get() = url.isBlank()
 }
 
@@ -26,12 +33,17 @@ object PhoneImportLogic {
         }
 
     /** Prüft Eingaben; null = ungültig. */
-    fun toInput(f: Map<String, String>): PhoneInput? {
+    fun toInput(f: Map<String, String>, providers: List<ProviderTemplate> = emptyList()): PhoneInput? {
         val url = f["url"].orEmpty().trim()
         if (url.isNotEmpty()) return if (url.startsWith("http://") || url.startsWith("https://")) PhoneInput(url, "", "", "") else null
-        val host = f["host"].orEmpty().trim()
         val user = f["user"].orEmpty().trim()
         val pass = f["pass"].orEmpty().trim()
+        val providerId = f["provider_id"].orEmpty().trim()
+        if (providerId.isNotEmpty()) {
+            val provider = providers.firstOrNull { it.id == providerId } ?: return null
+            return if (user.isNotEmpty() && pass.isNotEmpty()) PhoneInput("", provider.serverUrl, user, pass, provider.id, provider.displayName) else null
+        }
+        val host = f["host"].orEmpty().trim()
         return if (host.isNotEmpty() && user.isNotEmpty() && pass.isNotEmpty()) PhoneInput("", host, user, pass) else null
     }
 
@@ -58,25 +70,39 @@ object PhoneImportLogic {
 
     fun page(li: Int): String {
         fun t(a: String, b: String) = tr(li, a, b)
+        val providers = ProviderDirectory.cachedForPhoneImport()
+        val providerOptions = providers.joinToString("") { provider ->
+            "<option value=\"${provider.id.escapeHtml()}\">${provider.displayName.escapeHtml()}</option>"
+        }
+        val providerSection = if (providers.isEmpty()) "" else """
+<form method="post" action="/send"><h2>${t("Provider-Login", "Provider login")}</h2>
+<input name="code" inputmode="numeric" maxlength="4" placeholder="${t("Code vom Fernseher", "Code from TV")}" required>
+<select name="provider_id" required><option value="">${t("Select provider", "Select provider")}</option>$providerOptions</select>
+<input name="user" placeholder="${t("Benutzername", "Username")}" autocapitalize="off" required>
+<input name="pass" type="password" placeholder="${t("Passwort", "Password")}" autocapitalize="off" required>
+<button type="submit">${t("An den Fernseher senden", "Send to TV")}</button></form>"""
         return """<!doctype html><html lang="${I18nCore.CODES.getOrElse(li) { "en" }}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IPVIO Stream</title><style>
+<title>IPVIO Stream AHV</title><style>
 body{font-family:system-ui,sans-serif;background:#0B0F19;color:#fff;margin:0;padding:20px;max-width:560px}
 h1{font-size:22px}h2{font-size:16px;color:#9aa;margin-top:28px}
-input,textarea{width:100%;box-sizing:border-box;padding:14px;margin:6px 0;border-radius:10px;border:1px solid #333;background:#171a26;color:#fff;font-size:16px}
+input,textarea,select{width:100%;box-sizing:border-box;padding:14px;margin:6px 0;border-radius:10px;border:1px solid #333;background:#171a26;color:#fff;font-size:16px}
 button{width:100%;padding:14px;margin-top:10px;border:0;border-radius:10px;background:#4ADE80;color:#0B0F19;font-size:17px;font-weight:700}
-</style></head><body><h1>IPVIO Stream</h1>
-<p>${t("Sende deine Playlist an den Fernseher. Den Code siehst du auf dem Bildschirm.", "Send your playlist to the TV. You can see the code on the screen.")}</p>
+</style></head><body><h1>IPVIO Stream AHV</h1>
+<p>${t("Sende deine Playlist an den Fernseher. Den Code siehst du auf dem Bildschirm.", "Send your playlist to the TV. The code is shown on screen.")}</p>
+$providerSection
 <form method="post" action="/send"><h2>${t("M3U-Link", "M3U link")}</h2>
-<input name="code" inputmode="numeric" maxlength="4" placeholder="${t("Code vom Fernseher", "Code from the TV")}" required>
+<input name="code" inputmode="numeric" maxlength="4" placeholder="${t("Code vom Fernseher", "Code from TV")}" required>
 <textarea name="url" rows="3" placeholder="http://…/playlist.m3u"></textarea>
 <button type="submit">${t("An den Fernseher senden", "Send to TV")}</button></form>
-<form method="post" action="/send"><h2>${t("oder Xtream-Login", "or Xtream login")}</h2>
-<input name="code" inputmode="numeric" maxlength="4" placeholder="${t("Code vom Fernseher", "Code from the TV")}" required>
+<form method="post" action="/send"><h2>${t("Manual Xtream login", "Manual Xtream login")}</h2>
+<input name="code" inputmode="numeric" maxlength="4" placeholder="${t("Code vom Fernseher", "Code from TV")}" required>
 <input name="host" placeholder="${t("Server (z. B. http://server.tld:8080)", "Server (e.g. http://server.tld:8080)")}">
 <input name="user" placeholder="${t("Benutzername", "Username")}" autocapitalize="off">
 <input name="pass" placeholder="${t("Passwort", "Password")}" autocapitalize="off">
 <button type="submit">${t("An den Fernseher senden", "Send to TV")}</button></form></body></html>"""
     }
+
+    private fun String.escapeHtml(): String = replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
 
     fun message(li: Int, kind: String): String {
         val txt = when (kind) {
@@ -153,7 +179,7 @@ class PhoneImport(private val onReceive: (PhoneInput) -> Unit) {
                     fails >= 5 -> 429 to PhoneImportLogic.message(de, "lock")
                     f["code"].orEmpty().trim() != code -> { fails++; 403 to PhoneImportLogic.message(de, "code") }
                     else -> {
-                        val input = PhoneImportLogic.toInput(f)
+                        val input = PhoneImportLogic.toInput(f, ProviderDirectory.cachedForPhoneImport())
                         if (input == null) 400 to PhoneImportLogic.message(de, "bad")
                         else { onReceive(input); 200 to PhoneImportLogic.message(de, "ok") }
                     }

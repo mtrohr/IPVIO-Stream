@@ -36,7 +36,7 @@ object AppUpdate {
         runCatching {
             val u = url(c)
             if (u.isBlank()) error("Keine Update-Adresse eingetragen")
-            Net.base.newCall(Request.Builder().url(u).header("User-Agent", "IPVIO Stream").build()).execute().use { r ->
+            Net.base.newCall(Request.Builder().url(u).header("User-Agent", "IPVIO Stream AHV").build()).execute().use { r ->
                 if (!r.isSuccessful) error("Fehler ${r.code}")
                 val j = JSONObject(r.body?.string().orEmpty())
                 val code = j.optLong("versionCode", 0L)
@@ -54,7 +54,7 @@ object AppUpdate {
             val dir = File(c.cacheDir, "updates").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
             val out = File(dir, "ipvio-update.apk")
             val client = Net.withTimeouts(15, 60)
-            client.newCall(Request.Builder().url(info.apkUrl).header("User-Agent", "IPVIO Stream").build()).execute().use { r ->
+            client.newCall(Request.Builder().url(info.apkUrl).header("User-Agent", "IPVIO Stream AHV").build()).execute().use { r ->
                 if (!r.isSuccessful) error("Fehler ${r.code}")
                 val body = r.body ?: error("Leere Antwort")
                 val total = body.contentLength()
